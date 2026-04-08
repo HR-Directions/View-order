@@ -7,11 +7,12 @@
     <title>تتبع طلبك | إكسبريس</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet">
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-        import { getDatabase, ref, get, child } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+        import { getDatabase, ref, get, child, update } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
 
+        // إعدادات قاعدة البيانات الخاصة بك
         const firebaseConfig = {
             databaseURL: "https://delivery-2-1d699-default-rtdb.firebaseio.com/",
         };
@@ -19,6 +20,13 @@
         const app = initializeApp(firebaseConfig);
         const db = getDatabase(app);
 
+        // متغيرات عامة لحفظ حالة الطلب والتقييم
+        window.currentOrderKey = null;
+        window.currentOrder = null;
+        window.currentCourier = null;
+        window.selectedRating = 0;
+
+        // دالة البحث
         window.trackOrder = async function() {
             const queryVal = document.getElementById('searchInput').value.trim();
             if (!queryVal) return showToast('برجاء إدخال رقم الطلب أو الموبايل');
@@ -33,7 +41,6 @@
 
             try {
                 const dbRef = ref(db);
-                // جلب الطلبات
                 const ordersSnap = await get(child(dbRef, 'orders'));
                 
                 if (ordersSnap.exists()) {
@@ -43,10 +50,10 @@
 
                     for (let key in allOrders) {
                         const o = allOrders[key];
-                        // البحث بـ orderId (107) أو clientPhone (01223881051)
                         if (
                             (o.orderId && o.orderId.toString() === queryVal) || 
-                            (o.clientPhone && o.clientPhone.toString() === queryVal)
+                            (o.clientPhone && o.clientPhone.toString() === queryVal) ||
+                            key === queryVal
                         ) {
                             foundOrder = o;
                             orderKey = key;
@@ -55,13 +62,24 @@
                     }
 
                     if (foundOrder) {
-                        // محاولة جلب بيانات المندوب إذا كان الطلب خرج للتوصيل
-                        let courierData = null;
+                        window.currentOrderKey = orderKey;
+                        window.currentOrder = foundOrder;
+                        
+                        // جلب بيانات المندوب إذا كان الطلب مع مندوب
                         if (foundOrder.deliveryId) {
                             const userSnap = await get(child(dbRef, `users/${foundOrder.deliveryId}`));
-                            if (userSnap.exists()) courierData = userSnap.val();
+                            if (userSnap.exists()) window.currentCourier = userSnap.val();
+                        } else {
+                            window.currentCourier = null;
                         }
-                        renderOrderData(foundOrder, orderKey, courierData);
+                        
+                        // إعادة تهيئة قسم التقييم
+                        document.getElementById('ratingSection').classList.add('hidden');
+                        document.getElementById('btnConfirmReceipt').classList.remove('hidden');
+                        window.setRating(0);
+                        document.getElementById('ratingText').value = '';
+                        
+                        renderOrderData();
                     } else {
                         notFound.classList.remove('hidden');
                     }
@@ -76,49 +94,159 @@
             }
         };
 
-        function renderOrderData(order, id, courier) {
+        // دالة عرض البيانات
+        window.renderOrderData = function() {
+            const order = window.currentOrder;
+            const id = window.currentOrderKey;
+            const courier = window.currentCourier;
+            
             document.getElementById('resultArea').classList.remove('hidden');
 
-            // البيانات الأساسية (بناءً على التنسيق الذي أرسلته)
+            // البيانات الأساسية
             document.getElementById('displayOrderId').innerText = `#${order.orderId || id.substring(0,6)}`;
             document.getElementById('displayClient').innerText = order.client || 'عميل إكسبريس';
             document.getElementById('displayArea').innerText = order.area || 'غير محدد';
             document.getElementById('totalPrice').innerText = `${order.val || 0} ج.م`;
 
-            // الحالات
+            // هل الطلب منتهي؟
+            const isFinished = order.customerConfirmed === true || order.status === 'settled';
+
             const statusMap = {
                 'pending': { step: 1, label: 'جارِ التجهيز' },
                 'out': { step: 3, label: 'خرج للتوصيل' },
-                'delivered': { step: 4, label: 'انتظار الكاشير' },
-                'settled': { step: 4, label: 'تم الاستلام' }
+                'delivered': { step: 3, label: 'وصل للعنوان' }, 
+                'settled': { step: 4, label: 'مكتمل' }
             };
 
-            const current = statusMap[order.status] || { step: 1, label: 'تحت المراجعة' };
-            updateUI(current.step, current.label);
-
-            // منطق المندوب وقاعدة الـ 25 دقيقة
             const deliveryCard = document.getElementById('deliveryCard');
+            const successCard = document.getElementById('successCard');
             const delayAlert = document.getElementById('delayAlert');
-            
-            if (order.status === 'out' && courier) {
-                deliveryCard.classList.remove('hidden');
-                document.getElementById('courierName').innerText = courier.name || "مندوب التوصيل";
-                document.getElementById('courierPhone').innerText = courier.phone || "غير متاح";
-                document.getElementById('callAction').href = `tel:${courier.phone}`;
 
-                // فحص توقيت الخروج tsOut
-                if (order.tsOut) {
-                    const diffMins = Math.floor((Date.now() - order.tsOut) / 60000);
-                    if (diffMins >= 25) {
-                        delayAlert.classList.remove('hidden');
+            if (isFinished) {
+                // شاشة النجاح النهائية
+                updateUI(4, 'تم التسليم بنجاح');
+                deliveryCard.classList.add('hidden');
+                successCard.classList.remove('hidden');
+                
+                // عرض التقييم إذا وجد
+                const finalRatingUI = document.getElementById('finalRatingStars');
+                if (order.rating) {
+                    finalRatingUI.classList.remove('hidden');
+                    let starsHtml = '';
+                    for(let i=1; i<=5; i++) {
+                        starsHtml += `<i class="fas fa-star ${i <= order.rating ? 'text-yellow-400' : 'text-green-700/30'}"></i>`;
+                    }
+                    document.getElementById('starsContainerDone').innerHTML = starsHtml;
+                } else {
+                    finalRatingUI.classList.add('hidden');
+                }
+                
+            } else {
+                // شاشة التتبع العادية
+                successCard.classList.add('hidden');
+                const current = statusMap[order.status] || { step: 1, label: 'تحت المراجعة' };
+                updateUI(current.step, current.label);
+
+                if ((order.status === 'out' || order.status === 'delivered') && courier) {
+                    deliveryCard.classList.remove('hidden');
+                    document.getElementById('courierName').innerText = courier.name || "مندوب التوصيل";
+                    document.getElementById('courierPhone').innerText = courier.phone || "غير متاح";
+                    document.getElementById('callAction').href = `tel:${courier.phone}`;
+
+                    // تنبيه التأخير
+                    if (order.tsOut && order.status === 'out') {
+                        const diffMins = Math.floor((Date.now() - order.tsOut) / 60000);
+                        if (diffMins >= 25) {
+                            delayAlert.classList.remove('hidden');
+                        } else {
+                            delayAlert.classList.add('hidden');
+                        }
                     } else {
                         delayAlert.classList.add('hidden');
                     }
+                } else {
+                    deliveryCard.classList.add('hidden');
                 }
-            } else {
-                deliveryCard.classList.add('hidden');
             }
-        }
+        };
+
+        // فتح قسم التقييم
+        window.showRatingUI = function() {
+            document.getElementById('btnConfirmReceipt').classList.add('hidden');
+            document.getElementById('ratingSection').classList.remove('hidden');
+            document.getElementById('ratingSection').classList.add('animate-fade-in');
+        };
+
+        // اختيار النجوم
+        window.setRating = function(stars) {
+            window.selectedRating = stars;
+            for(let i=1; i<=5; i++) {
+                const starEl = document.getElementById(`star-${i}`);
+                if(i <= stars) {
+                    starEl.classList.remove('text-white/20');
+                    starEl.classList.add('text-yellow-400', 'scale-110');
+                } else {
+                    starEl.classList.add('text-white/20');
+                    starEl.classList.remove('text-yellow-400', 'scale-110');
+                }
+            }
+
+            const noteBox = document.getElementById('badRatingNote');
+            if (stars > 0 && stars <= 3) {
+                noteBox.classList.remove('hidden');
+                noteBox.classList.add('animate-fade-in');
+            } else {
+                noteBox.classList.add('hidden');
+            }
+            
+            document.getElementById('btnSubmitFinal').disabled = false;
+            document.getElementById('btnSubmitFinal').classList.remove('opacity-50');
+        };
+
+        // الإرسال النهائي
+        window.submitFinalReceipt = async function() {
+            if (!window.currentOrderKey) return;
+            
+            if (window.selectedRating === 0) {
+                return showToast('برجاء اختيار تقييم للمندوب أولاً');
+            }
+
+            const noteText = document.getElementById('ratingText').value.trim();
+            if (window.selectedRating <= 3 && noteText === '') {
+                return showToast('برجاء كتابة ملاحظاتك لنتمكن من تحسين الخدمة');
+            }
+            
+            const btn = document.getElementById('btnSubmitFinal');
+            const originalHtml = btn.innerHTML;
+            
+            btn.disabled = true;
+            btn.innerHTML = '<div class="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div> <span>جاري الحفظ...</span>';
+            
+            try {
+                // تحديث الطلب في القاعدة
+                await update(ref(db, `orders/${window.currentOrderKey}`), {
+                    customerConfirmed: true,
+                    customerConfirmedTs: Date.now(),
+                    rating: window.selectedRating,
+                    ratingNote: noteText
+                });
+                
+                showToast('شكراً لك! تم التقييم والتأكيد بنجاح.');
+                
+                // تحديث المحلي
+                window.currentOrder.customerConfirmed = true;
+                window.currentOrder.rating = window.selectedRating;
+                window.currentOrder.ratingNote = noteText;
+                
+                renderOrderData();
+                
+            } catch (error) {
+                console.error(error);
+                showToast('حدث خطأ، يرجى المحاولة مرة أخرى.');
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
+            }
+        };
 
         function updateUI(step, label) {
             const bar = document.getElementById('progressBar');
@@ -133,27 +261,39 @@
                 if (i < step) {
                     iconBox.className = "icon-box w-10 h-10 rounded-full bg-green-500 text-white flex items-center justify-center border-4 border-white shadow-sm";
                     iconBox.innerHTML = '<i class="fas fa-check text-[10px]"></i>';
+                    text.className = "text-[9px] text-green-600 font-black";
                 } else if (i === step) {
-                    iconBox.className = "icon-box w-12 h-12 rounded-full bg-blue-600 text-white flex items-center justify-center border-4 border-white shadow-lg pulse -mt-1";
-                    text.className = "text-[10px] text-blue-600 font-black";
+                    if(step === 4) {
+                        iconBox.className = "icon-box w-12 h-12 rounded-full bg-green-500 text-white flex items-center justify-center border-4 border-white shadow-lg pulse-green -mt-1";
+                        iconBox.innerHTML = '<i class="fas fa-check-double text-lg"></i>';
+                        text.className = "text-[10px] text-green-600 font-black";
+                    } else {
+                        iconBox.className = "icon-box w-12 h-12 rounded-full bg-blue-600 text-white flex items-center justify-center border-4 border-white shadow-lg pulse -mt-1";
+                        text.className = "text-[10px] text-blue-600 font-black";
+                    }
                 } else {
                     iconBox.className = "icon-box w-10 h-10 rounded-full bg-slate-100 text-slate-300 flex items-center justify-center border-4 border-white";
+                    text.className = "text-[9px] text-slate-400 font-black";
                 }
             }
         }
 
-        function showToast(msg) {
+        window.showToast = function(msg) {
             const t = document.getElementById('toast');
             t.innerText = msg;
             t.style.opacity = '1';
-            setTimeout(() => t.style.opacity = '0', 3000);
+            setTimeout(() => t.style.opacity = '0', 3500);
         }
     </script>
     <style>
         body { background: #f4f7fa; font-family: 'Cairo', sans-serif; }
         .pulse { animation: pulse 2s infinite; }
-        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.1); } 100% { transform: scale(1); } }
-        .icon-box { transition: all 0.4s ease; }
+        .pulse-green { animation: pulse-green 2s infinite; }
+        @keyframes pulse { 0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.4); } 70% { transform: scale(1.05); box-shadow: 0 0 0 10px rgba(37, 99, 235, 0); } 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); } }
+        @keyframes pulse-green { 0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); } 70% { transform: scale(1.05); box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); } 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); } }
+        .icon-box { transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
+        .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
 <body class="antialiased text-slate-900 pb-10">
@@ -174,20 +314,20 @@
 
     <main class="max-w-md mx-auto px-4 mt-8">
         
-        <!-- Search -->
-        <div class="bg-white p-8 rounded-[2.5rem] shadow-2xl shadow-blue-900/5 border border-white mb-6">
+        <!-- Search Card -->
+        <div class="bg-white p-8 rounded-[2.5rem] shadow-xl shadow-slate-200/50 border border-white mb-6">
             <h2 class="text-2xl font-black text-slate-800 mb-1">أين أوردرك؟</h2>
-            <p class="text-slate-400 text-sm mb-8 font-semibold">تتبع طلبك بكل سهولة</p>
+            <p class="text-slate-400 text-sm mb-8 font-semibold">تتبع وقم بتأكيد استلام طلبك بكل سهولة</p>
             
             <div class="space-y-4">
                 <div class="relative group">
-                    <input type="text" id="searchInput" placeholder="أدخل رقم الموبايل المسجل" 
+                    <input type="text" id="searchInput" placeholder="أدخل رقم الموبايل أو الطلب" 
                            class="w-full bg-slate-50 border-2 border-slate-100 py-4 pr-12 pl-4 rounded-2xl focus:border-blue-600 focus:outline-none transition-all font-bold text-lg">
-                    <i class="fas fa-mobile-alt absolute right-5 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-blue-600"></i>
+                    <i class="fas fa-search absolute right-5 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-blue-600 transition-colors"></i>
                 </div>
-                <button onclick="trackOrder()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-2xl shadow-xl shadow-blue-200 flex items-center justify-center gap-3 transition-transform active:scale-95">
+                <button onclick="trackOrder()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-2xl shadow-lg shadow-blue-200 flex items-center justify-center gap-3 transition-transform active:scale-95">
                     <span>ابحث عن الطلب</span>
-                    <i class="fas fa-search-location"></i>
+                    <i class="fas fa-arrow-left"></i>
                 </button>
             </div>
         </div>
@@ -199,12 +339,12 @@
         </div>
 
         <!-- Not Found -->
-        <div id="notFound" class="hidden text-center py-12 bg-white rounded-[2.5rem] border-2 border-dashed border-slate-100">
+        <div id="notFound" class="hidden text-center py-12 bg-white rounded-[2.5rem] border-2 border-dashed border-slate-200">
             <div class="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                <i class="fas fa-ghost text-3xl text-slate-200"></i>
+                <i class="fas fa-box-open text-3xl text-slate-300"></i>
             </div>
             <h3 class="font-black text-slate-700">لا توجد نتائج!</h3>
-            <p class="text-slate-400 text-xs px-10 leading-relaxed">لم نجد أي طلبات نشطة مرتبطة بهذا الرقم حالياً.</p>
+            <p class="text-slate-400 text-xs px-10 mt-2 leading-relaxed">لم نجد أي طلبات نشطة مرتبطة بهذا الرقم حالياً. تأكد من الرقم وحاول مجدداً.</p>
         </div>
 
         <!-- Result Area -->
@@ -212,7 +352,7 @@
             
             <!-- Main Status Card -->
             <div class="bg-white rounded-[2.5rem] p-8 shadow-sm border border-slate-100 relative overflow-hidden">
-                <div id="statusBadge" class="bg-blue-600 text-white px-4 py-1.5 rounded-full text-[10px] font-black absolute top-8 left-8 shadow-lg shadow-blue-100">
+                <div id="statusBadge" class="bg-blue-600 text-white px-4 py-1.5 rounded-full text-[10px] font-black absolute top-8 left-8 shadow-lg shadow-blue-100 transition-colors duration-500">
                     -
                 </div>
                 
@@ -220,14 +360,14 @@
                     <span class="text-slate-300 text-[10px] font-black uppercase tracking-widest block mb-1">Order ID</span>
                     <h3 id="displayOrderId" class="text-3xl font-black text-slate-800 tracking-tighter">#---</h3>
                     <div class="flex items-center gap-2 mt-2">
-                         <span id="displayClient" class="text-slate-500 font-bold text-xs border-l pl-2">---</span>
+                         <span id="displayClient" class="text-slate-500 font-bold text-xs border-l border-slate-200 pl-2">---</span>
                          <span id="displayDate" class="text-slate-400 text-[10px] font-bold">--:--</span>
                     </div>
                 </div>
 
                 <!-- Stepper -->
                 <div class="mt-12 relative px-2">
-                    <div class="h-1 bg-slate-100 w-full rounded-full overflow-hidden">
+                    <div class="h-1.5 bg-slate-100 w-full rounded-full overflow-hidden">
                         <div id="progressBar" class="h-full bg-blue-600 transition-all duration-1000 ease-in-out w-0"></div>
                     </div>
                     
@@ -246,59 +386,106 @@
                         </div>
                         <div id="step4" class="flex flex-col items-center gap-2">
                             <div class="icon-box"><i class="fas fa-flag-checkered text-[10px]"></i></div>
-                            <span class="text-[9px] text-slate-400 font-black">الوصول</span>
+                            <span class="text-[9px] text-slate-400 font-black">الاستلام</span>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Courier Card -->
+            <!-- Success Card (شاشة النجاح النهائية) -->
+            <div id="successCard" class="hidden bg-gradient-to-br from-green-500 to-emerald-600 rounded-[2.5rem] p-8 text-white shadow-2xl relative overflow-hidden text-center animate-fade-in">
+                <div class="absolute -right-10 -top-10 w-32 h-32 bg-white/10 rounded-full blur-2xl"></div>
+                <div class="absolute -left-10 -bottom-10 w-32 h-32 bg-white/10 rounded-full blur-2xl"></div>
+                
+                <div class="w-20 h-20 bg-white rounded-full flex items-center justify-center text-green-500 text-4xl mx-auto mb-4 shadow-lg pulse-green">
+                    <i class="fas fa-check"></i>
+                </div>
+                <h3 class="text-2xl font-black mb-2">تم تسليم الطلب بنجاح!</h3>
+                <p class="text-green-100 text-xs font-bold leading-relaxed px-4 mb-4">نشكر ثقتكم في إكسبريس، نتمنى لكم تجربة مميزة دائماً.</p>
+                
+                <div id="finalRatingStars" class="hidden bg-white/10 p-3 rounded-2xl border border-white/20 mt-4 backdrop-blur-sm">
+                    <p class="text-[10px] font-bold text-green-100 mb-2">تقييمك للمندوب</p>
+                    <div id="starsContainerDone" class="flex justify-center gap-1 text-lg">
+                        <!-- نجوم التقييم المكتملة تظهر هنا -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Courier Card (مع زر التأكيد ونظام التقييم) -->
             <div id="deliveryCard" class="hidden bg-slate-900 rounded-[2.5rem] p-7 text-white shadow-2xl relative overflow-hidden">
-                <div class="flex items-center justify-between mb-6">
+                <div class="absolute -right-4 -top-4 w-24 h-24 bg-white/5 rounded-full"></div>
+                
+                <div class="flex items-center justify-between mb-6 relative">
                     <div class="flex items-center gap-4">
-                        <div class="w-14 h-14 bg-white/10 rounded-2xl flex items-center justify-center text-2xl border border-white/10">
+                        <div class="w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center text-2xl border border-white/10 shadow-lg">
                             <i class="fas fa-user-tie"></i>
                         </div>
                         <div>
-                            <p class="text-white/30 text-[10px] font-black uppercase tracking-wider mb-0.5">مندوبك الآن</p>
+                            <p class="text-white/40 text-[10px] font-black uppercase tracking-wider mb-0.5">مندوبك في الطريق</p>
                             <h4 id="courierName" class="font-black text-xl">---</h4>
                         </div>
                     </div>
-                    <a id="callAction" href="#" class="w-14 h-14 bg-blue-600 text-white rounded-2xl flex items-center justify-center shadow-xl pulse active:scale-90 transition-transform">
+                    <a id="callAction" href="#" class="w-14 h-14 bg-white text-slate-900 rounded-2xl flex items-center justify-center shadow-xl pulse active:scale-90 transition-transform">
                         <i class="fas fa-phone-alt"></i>
                     </a>
                 </div>
-                
-                <div class="flex items-center justify-between bg-white/5 p-4 rounded-2xl border border-white/5">
-                    <div>
-                        <p class="text-white/30 text-[9px] font-bold">رقم التواصل</p>
-                        <span id="courierPhone" class="font-mono tracking-widest text-blue-400">---</span>
-                    </div>
-                    <i class="fas fa-shield-alt text-white/10 text-xl"></i>
+
+                <div id="delayAlert" class="hidden mb-4 bg-red-500/20 border border-red-500/30 p-4 rounded-2xl flex gap-3 items-center">
+                    <div class="w-2 h-2 bg-red-500 rounded-full animate-ping"></div>
+                    <p class="text-[10px] font-bold text-red-100 leading-relaxed">
+                         تجاوز الطلب وقت التوصيل المتوقع. يمكنك الاتصال بالمندوب الآن.
+                    </p>
                 </div>
 
-                <div id="delayAlert" class="hidden mt-4 bg-red-600/20 border border-red-600/30 p-4 rounded-2xl flex gap-3 items-center">
-                    <div class="w-2 h-2 bg-red-600 rounded-full animate-ping"></div>
-                    <p class="text-[10px] font-bold text-red-100 leading-relaxed">
-                         تجاوز الطلب 25 دقيقة منذ خروجه. يمكنك الاتصال بالمندوب الآن.
-                    </p>
+                <!-- زر الإظهار للتقييم -->
+                <button id="btnConfirmReceipt" onclick="showRatingUI()" class="w-full bg-green-500 hover:bg-green-600 text-white font-black py-4 rounded-2xl shadow-lg shadow-green-500/30 flex items-center justify-center gap-2 transition-all active:scale-95 relative z-10 mt-2">
+                    <i class="fas fa-clipboard-check text-lg"></i>
+                    <span>تأكيد استلام الطلب الآن</span>
+                </button>
+
+                <!-- قسم التقييم التفاعلي (مخفي افتراضياً) -->
+                <div id="ratingSection" class="hidden mt-4 bg-slate-800/80 backdrop-blur-md p-5 rounded-2xl border border-slate-700 text-center">
+                    <h4 class="text-white font-black mb-1">ما هو تقييمك للمندوب؟</h4>
+                    <p class="text-slate-400 text-[10px] font-bold mb-4">اضغط على النجوم للتقييم</p>
+                    
+                    <div class="flex justify-center gap-3 mb-4 dir-ltr flex-row-reverse">
+                        <!-- النجوم تُرتب عكسياً للـ Flex -->
+                        <i id="star-5" onclick="setRating(5)" class="fas fa-star text-3xl text-white/20 cursor-pointer transition-all hover:scale-110"></i>
+                        <i id="star-4" onclick="setRating(4)" class="fas fa-star text-3xl text-white/20 cursor-pointer transition-all hover:scale-110"></i>
+                        <i id="star-3" onclick="setRating(3)" class="fas fa-star text-3xl text-white/20 cursor-pointer transition-all hover:scale-110"></i>
+                        <i id="star-2" onclick="setRating(2)" class="fas fa-star text-3xl text-white/20 cursor-pointer transition-all hover:scale-110"></i>
+                        <i id="star-1" onclick="setRating(1)" class="fas fa-star text-3xl text-white/20 cursor-pointer transition-all hover:scale-110"></i>
+                    </div>
+
+                    <div id="badRatingNote" class="hidden mb-4 text-right">
+                        <label class="block text-amber-400 text-[10px] font-bold mb-2"><i class="fas fa-exclamation-circle ml-1"></i>نعتذر عن تجربتك، يرجى كتابة السبب لنقوم بمحاسبة المقصرين:</label>
+                        <textarea id="ratingText" rows="2" class="w-full bg-slate-900 border border-amber-500/50 text-white rounded-xl p-3 text-xs font-bold focus:border-amber-400 outline-none transition-colors placeholder:text-slate-500" placeholder="مثال: تأخر المندوب، أسلوب غير لائق، الطلب غير مكتمل..."></textarea>
+                    </div>
+
+                    <button onclick="submitFinalReceipt()" id="btnSubmitFinal" disabled class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 text-white font-black py-3.5 rounded-xl shadow-lg transition-all flex justify-center items-center gap-2 opacity-50">
+                        <span>إرسال التقييم وتأكيد الاستلام</span>
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                    <button onclick="document.getElementById('ratingSection').classList.add('hidden'); document.getElementById('btnConfirmReceipt').classList.remove('hidden');" class="mt-3 text-slate-400 text-[10px] font-bold hover:text-white underline">
+                        تراجع
+                    </button>
                 </div>
             </div>
 
             <!-- Details Card -->
             <div class="bg-white rounded-[2.5rem] p-8 border border-slate-100 shadow-sm">
                 <div class="flex justify-between items-center mb-6">
-                    <h4 class="font-black text-slate-800 text-sm tracking-tighter">تفاصيل التوصيل</h4>
+                    <h4 class="font-black text-slate-800 text-sm tracking-tighter">تفاصيل الحساب والتوصيل</h4>
                     <span id="totalPrice" class="font-black text-2xl text-blue-600 tracking-tighter">0 ج.م</span>
                 </div>
                 <div class="space-y-4">
-                    <div class="flex items-center gap-3">
-                        <div class="w-8 h-8 bg-slate-50 rounded-lg flex items-center justify-center text-blue-600 text-xs">
+                    <div class="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                        <div class="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-blue-600 text-sm shadow-sm">
                             <i class="fas fa-map-marker-alt"></i>
                         </div>
                         <div>
-                            <p class="text-slate-400 text-[9px] font-bold uppercase">المنطقة</p>
-                            <p id="displayArea" class="text-xs font-black text-slate-700">---</p>
+                            <p class="text-slate-400 text-[9px] font-black uppercase mb-0.5">منطقة التوصيل</p>
+                            <p id="displayArea" class="text-sm font-black text-slate-700">---</p>
                         </div>
                     </div>
                 </div>
@@ -306,11 +493,10 @@
         </div>
     </main>
 
-    <div id="toast" class="fixed bottom-10 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-8 py-3 rounded-full text-[10px] font-black opacity-0 shadow-2xl z-[100] transition-all duration-300 pointer-events-none">
+    <div id="toast" class="fixed bottom-10 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-8 py-3 rounded-full text-xs font-black opacity-0 shadow-2xl z-[100] transition-all duration-300 pointer-events-none w-max max-w-[90vw] text-center">
         رسالة تنبيه
     </div>
 
 </body>
 </html>
-
 
