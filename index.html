@@ -1,0 +1,316 @@
+
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تتبع طلبك | إكسبريس</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getDatabase, ref, get, child } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+        const firebaseConfig = {
+            databaseURL: "https://delivery-2-1d699-default-rtdb.firebaseio.com/",
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        window.trackOrder = async function() {
+            const queryVal = document.getElementById('searchInput').value.trim();
+            if (!queryVal) return showToast('برجاء إدخال رقم الطلب أو الموبايل');
+
+            const loader = document.getElementById('loader');
+            const resultArea = document.getElementById('resultArea');
+            const notFound = document.getElementById('notFound');
+
+            loader.classList.remove('hidden');
+            resultArea.classList.add('hidden');
+            notFound.classList.add('hidden');
+
+            try {
+                const dbRef = ref(db);
+                // جلب الطلبات
+                const ordersSnap = await get(child(dbRef, 'orders'));
+                
+                if (ordersSnap.exists()) {
+                    const allOrders = ordersSnap.val();
+                    let foundOrder = null;
+                    let orderKey = null;
+
+                    for (let key in allOrders) {
+                        const o = allOrders[key];
+                        // البحث بـ orderId (107) أو clientPhone (01223881051)
+                        if (
+                            (o.orderId && o.orderId.toString() === queryVal) || 
+                            (o.clientPhone && o.clientPhone.toString() === queryVal)
+                        ) {
+                            foundOrder = o;
+                            orderKey = key;
+                            break;
+                        }
+                    }
+
+                    if (foundOrder) {
+                        // محاولة جلب بيانات المندوب إذا كان الطلب خرج للتوصيل
+                        let courierData = null;
+                        if (foundOrder.deliveryId) {
+                            const userSnap = await get(child(dbRef, `users/${foundOrder.deliveryId}`));
+                            if (userSnap.exists()) courierData = userSnap.val();
+                        }
+                        renderOrderData(foundOrder, orderKey, courierData);
+                    } else {
+                        notFound.classList.remove('hidden');
+                    }
+                } else {
+                    notFound.classList.remove('hidden');
+                }
+            } catch (error) {
+                console.error(error);
+                showToast('خطأ في الاتصال بالخادم');
+            } finally {
+                loader.classList.add('hidden');
+            }
+        };
+
+        function renderOrderData(order, id, courier) {
+            document.getElementById('resultArea').classList.remove('hidden');
+
+            // البيانات الأساسية (بناءً على التنسيق الذي أرسلته)
+            document.getElementById('displayOrderId').innerText = `#${order.orderId || id.substring(0,6)}`;
+            document.getElementById('displayClient').innerText = order.client || 'عميل إكسبريس';
+            document.getElementById('displayArea').innerText = order.area || 'غير محدد';
+            document.getElementById('totalPrice').innerText = `${order.val || 0} ج.م`;
+
+            // الحالات
+            const statusMap = {
+                'pending': { step: 1, label: 'جارِ التجهيز' },
+                'out': { step: 3, label: 'خرج للتوصيل' },
+                'delivered': { step: 4, label: 'انتظار الكاشير' },
+                'settled': { step: 4, label: 'تم الاستلام' }
+            };
+
+            const current = statusMap[order.status] || { step: 1, label: 'تحت المراجعة' };
+            updateUI(current.step, current.label);
+
+            // منطق المندوب وقاعدة الـ 25 دقيقة
+            const deliveryCard = document.getElementById('deliveryCard');
+            const delayAlert = document.getElementById('delayAlert');
+            
+            if (order.status === 'out' && courier) {
+                deliveryCard.classList.remove('hidden');
+                document.getElementById('courierName').innerText = courier.name || "مندوب التوصيل";
+                document.getElementById('courierPhone').innerText = courier.phone || "غير متاح";
+                document.getElementById('callAction').href = `tel:${courier.phone}`;
+
+                // فحص توقيت الخروج tsOut
+                if (order.tsOut) {
+                    const diffMins = Math.floor((Date.now() - order.tsOut) / 60000);
+                    if (diffMins >= 25) {
+                        delayAlert.classList.remove('hidden');
+                    } else {
+                        delayAlert.classList.add('hidden');
+                    }
+                }
+            } else {
+                deliveryCard.classList.add('hidden');
+            }
+        }
+
+        function updateUI(step, label) {
+            const bar = document.getElementById('progressBar');
+            document.getElementById('statusBadge').innerText = label;
+            bar.style.width = `${((step - 1) / 3) * 100}%`;
+
+            for (let i = 1; i <= 4; i++) {
+                const el = document.getElementById(`step${i}`);
+                const iconBox = el.querySelector('.icon-box');
+                const text = el.querySelector('span');
+
+                if (i < step) {
+                    iconBox.className = "icon-box w-10 h-10 rounded-full bg-green-500 text-white flex items-center justify-center border-4 border-white shadow-sm";
+                    iconBox.innerHTML = '<i class="fas fa-check text-[10px]"></i>';
+                } else if (i === step) {
+                    iconBox.className = "icon-box w-12 h-12 rounded-full bg-blue-600 text-white flex items-center justify-center border-4 border-white shadow-lg pulse -mt-1";
+                    text.className = "text-[10px] text-blue-600 font-black";
+                } else {
+                    iconBox.className = "icon-box w-10 h-10 rounded-full bg-slate-100 text-slate-300 flex items-center justify-center border-4 border-white";
+                }
+            }
+        }
+
+        function showToast(msg) {
+            const t = document.getElementById('toast');
+            t.innerText = msg;
+            t.style.opacity = '1';
+            setTimeout(() => t.style.opacity = '0', 3000);
+        }
+    </script>
+    <style>
+        body { background: #f4f7fa; font-family: 'Cairo', sans-serif; }
+        .pulse { animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.1); } 100% { transform: scale(1); } }
+        .icon-box { transition: all 0.4s ease; }
+    </style>
+</head>
+<body class="antialiased text-slate-900 pb-10">
+
+    <!-- Header -->
+    <nav class="bg-white px-6 py-5 flex justify-between items-center shadow-sm sticky top-0 z-50">
+        <div class="flex items-center gap-2">
+            <div class="bg-blue-600 w-8 h-8 rounded-lg flex items-center justify-center text-white shadow-lg">
+                <i class="fas fa-route"></i>
+            </div>
+            <span class="font-black text-lg tracking-tight">إكسبريس <span class="text-blue-600">لايف</span></span>
+        </div>
+        <div class="flex items-center gap-2 text-[10px] font-bold text-slate-400">
+            <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+            متصل بالنظام
+        </div>
+    </nav>
+
+    <main class="max-w-md mx-auto px-4 mt-8">
+        
+        <!-- Search -->
+        <div class="bg-white p-8 rounded-[2.5rem] shadow-2xl shadow-blue-900/5 border border-white mb-6">
+            <h2 class="text-2xl font-black text-slate-800 mb-1">أين أوردرك؟</h2>
+            <p class="text-slate-400 text-sm mb-8 font-semibold">تتبع طلبك بكل سهولة</p>
+            
+            <div class="space-y-4">
+                <div class="relative group">
+                    <input type="text" id="searchInput" placeholder="أدخل رقم الموبايل المسجل" 
+                           class="w-full bg-slate-50 border-2 border-slate-100 py-4 pr-12 pl-4 rounded-2xl focus:border-blue-600 focus:outline-none transition-all font-bold text-lg">
+                    <i class="fas fa-mobile-alt absolute right-5 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-blue-600"></i>
+                </div>
+                <button onclick="trackOrder()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-2xl shadow-xl shadow-blue-200 flex items-center justify-center gap-3 transition-transform active:scale-95">
+                    <span>ابحث عن الطلب</span>
+                    <i class="fas fa-search-location"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Loader -->
+        <div id="loader" class="hidden text-center py-10">
+            <div class="inline-block w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+            <p class="text-slate-400 text-sm mt-4 font-bold tracking-widest">جاري سحب البيانات...</p>
+        </div>
+
+        <!-- Not Found -->
+        <div id="notFound" class="hidden text-center py-12 bg-white rounded-[2.5rem] border-2 border-dashed border-slate-100">
+            <div class="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                <i class="fas fa-ghost text-3xl text-slate-200"></i>
+            </div>
+            <h3 class="font-black text-slate-700">لا توجد نتائج!</h3>
+            <p class="text-slate-400 text-xs px-10 leading-relaxed">لم نجد أي طلبات نشطة مرتبطة بهذا الرقم حالياً.</p>
+        </div>
+
+        <!-- Result Area -->
+        <div id="resultArea" class="hidden space-y-4">
+            
+            <!-- Main Status Card -->
+            <div class="bg-white rounded-[2.5rem] p-8 shadow-sm border border-slate-100 relative overflow-hidden">
+                <div id="statusBadge" class="bg-blue-600 text-white px-4 py-1.5 rounded-full text-[10px] font-black absolute top-8 left-8 shadow-lg shadow-blue-100">
+                    -
+                </div>
+                
+                <div class="mt-2">
+                    <span class="text-slate-300 text-[10px] font-black uppercase tracking-widest block mb-1">Order ID</span>
+                    <h3 id="displayOrderId" class="text-3xl font-black text-slate-800 tracking-tighter">#---</h3>
+                    <div class="flex items-center gap-2 mt-2">
+                         <span id="displayClient" class="text-slate-500 font-bold text-xs border-l pl-2">---</span>
+                         <span id="displayDate" class="text-slate-400 text-[10px] font-bold">--:--</span>
+                    </div>
+                </div>
+
+                <!-- Stepper -->
+                <div class="mt-12 relative px-2">
+                    <div class="h-1 bg-slate-100 w-full rounded-full overflow-hidden">
+                        <div id="progressBar" class="h-full bg-blue-600 transition-all duration-1000 ease-in-out w-0"></div>
+                    </div>
+                    
+                    <div class="flex justify-between mt-6">
+                        <div id="step1" class="flex flex-col items-center gap-2">
+                            <div class="icon-box"><i class="fas fa-utensils text-[10px]"></i></div>
+                            <span class="text-[9px] text-slate-400 font-black">التجهيز</span>
+                        </div>
+                        <div id="step2" class="flex flex-col items-center gap-2">
+                            <div class="icon-box"><i class="fas fa-check text-[10px]"></i></div>
+                            <span class="text-[9px] text-slate-400 font-black">المراجعة</span>
+                        </div>
+                        <div id="step3" class="flex flex-col items-center gap-2">
+                            <div class="icon-box"><i class="fas fa-motorcycle text-[10px]"></i></div>
+                            <span class="text-[9px] text-slate-400 font-black">التوصيل</span>
+                        </div>
+                        <div id="step4" class="flex flex-col items-center gap-2">
+                            <div class="icon-box"><i class="fas fa-flag-checkered text-[10px]"></i></div>
+                            <span class="text-[9px] text-slate-400 font-black">الوصول</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Courier Card -->
+            <div id="deliveryCard" class="hidden bg-slate-900 rounded-[2.5rem] p-7 text-white shadow-2xl relative overflow-hidden">
+                <div class="flex items-center justify-between mb-6">
+                    <div class="flex items-center gap-4">
+                        <div class="w-14 h-14 bg-white/10 rounded-2xl flex items-center justify-center text-2xl border border-white/10">
+                            <i class="fas fa-user-tie"></i>
+                        </div>
+                        <div>
+                            <p class="text-white/30 text-[10px] font-black uppercase tracking-wider mb-0.5">مندوبك الآن</p>
+                            <h4 id="courierName" class="font-black text-xl">---</h4>
+                        </div>
+                    </div>
+                    <a id="callAction" href="#" class="w-14 h-14 bg-blue-600 text-white rounded-2xl flex items-center justify-center shadow-xl pulse active:scale-90 transition-transform">
+                        <i class="fas fa-phone-alt"></i>
+                    </a>
+                </div>
+                
+                <div class="flex items-center justify-between bg-white/5 p-4 rounded-2xl border border-white/5">
+                    <div>
+                        <p class="text-white/30 text-[9px] font-bold">رقم التواصل</p>
+                        <span id="courierPhone" class="font-mono tracking-widest text-blue-400">---</span>
+                    </div>
+                    <i class="fas fa-shield-alt text-white/10 text-xl"></i>
+                </div>
+
+                <div id="delayAlert" class="hidden mt-4 bg-red-600/20 border border-red-600/30 p-4 rounded-2xl flex gap-3 items-center">
+                    <div class="w-2 h-2 bg-red-600 rounded-full animate-ping"></div>
+                    <p class="text-[10px] font-bold text-red-100 leading-relaxed">
+                         تجاوز الطلب 25 دقيقة منذ خروجه. يمكنك الاتصال بالمندوب الآن.
+                    </p>
+                </div>
+            </div>
+
+            <!-- Details Card -->
+            <div class="bg-white rounded-[2.5rem] p-8 border border-slate-100 shadow-sm">
+                <div class="flex justify-between items-center mb-6">
+                    <h4 class="font-black text-slate-800 text-sm tracking-tighter">تفاصيل التوصيل</h4>
+                    <span id="totalPrice" class="font-black text-2xl text-blue-600 tracking-tighter">0 ج.م</span>
+                </div>
+                <div class="space-y-4">
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 bg-slate-50 rounded-lg flex items-center justify-center text-blue-600 text-xs">
+                            <i class="fas fa-map-marker-alt"></i>
+                        </div>
+                        <div>
+                            <p class="text-slate-400 text-[9px] font-bold uppercase">المنطقة</p>
+                            <p id="displayArea" class="text-xs font-black text-slate-700">---</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div id="toast" class="fixed bottom-10 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-8 py-3 rounded-full text-[10px] font-black opacity-0 shadow-2xl z-[100] transition-all duration-300 pointer-events-none">
+        رسالة تنبيه
+    </div>
+
+</body>
+</html>
+
+
